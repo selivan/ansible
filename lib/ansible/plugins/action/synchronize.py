@@ -110,11 +110,6 @@ class ActionModule(ActionBase):
 
         # We may need to switch to local connection
         original_transport = task_vars.get('ansible_connection') or self._play_context.connection
-        # We do need to not use privilege escalation on the machine running
-        # the module.  Instead we run it on the machine rsync is connecting
-        # to.
-        original_become = self._play_context.become
-        self._play_context.become = False
 
         remote_transport = False
         if original_transport != 'local':
@@ -238,18 +233,18 @@ class ActionModule(ActionBase):
         # Allow custom rsync path argument
         rsync_path = self._task.args.get('rsync_path', None)
 
-        if dest_is_local:
-            # Restore the become settings because a local connection will
-            # perform privilege escalation for both sides of the connection
-            # equally
-            self._play_context.become = original_become
+        if not dest_is_local:
+            if self._play_context.become and not rsync_path and transport_overridden:
+                # If no rsync_path is set, become was originally set, and dest is
+                # remote then add privilege escalation here.
+                if self._play_context.become_method == 'sudo':
+                    rsync_path = 'sudo rsync'
+                # TODO: have to add in the rest of the become methods here
 
-        if not dest_is_local and not rsync_path and transport_overridden and original_become:
-            # If no rsync_path is set, become was originally set, and dest is
-            # remote then add privilege escalation here.
-            if self._play_context.become_method == 'sudo':
-                rsync_path = 'sudo rsync'
-            # TODO: have to add in the rest of the become methods here
+            # We cannot use privilege escalation on the machine running the
+            # module.  Instead we run it on the machine rsync is connecting
+            # to.
+            self._play_context.become = False
 
         # make sure rsync path is quoted.
         if rsync_path:
