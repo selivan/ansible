@@ -103,16 +103,40 @@ class ActionModule(ActionBase):
 
     def run(self, tmp=None, task_vars=None):
         ''' generates params and passes them on to the rsync module '''
+        # When modifying this function be aware of the tricky convolutions
+        # your thoughts have to go through:
+        #
+        # In normal ansible, we connect from controller to inventory_hostname
+        # (playbook's hosts: field) or controller to delegate_to host and run
+        # a module on one of those hosts.
+        #
+        # So things that are directly related to the core of ansible are in
+        # terms of that sort of connection that always originate on the
+        # controller.
+        #
+        # In synchronize we use ansible to connect to either the controller or
+        # to the delegate_to host and then run rsync which makes its own
+        # connection from controller to inventory_hostname or delegate_to to
+        # inventory_hostname.
+        #
+        # That means synchronize needs to have some knowledge of the
+        # controller to inventory_host/delegate host that ansible typically
+        # establishes and use those to construct a command line for rsync to
+        # connect from the inventory_host to the controller/delegate.  The
+        # challenge for coders is remembering which leg of the trip is
+        # associated with the conditions that you're checking at any one time.
         if task_vars is None:
             task_vars = dict()
 
         result = super(ActionModule, self).run(tmp, task_vars)
 
-        # We may need to switch to local connection
-        original_transport = task_vars.get('ansible_connection') or self._play_context.connection
+        # self._play_context.connection accounts for delegate_to so
+        # remote_transport is the transport ansible thought it would need
+        # between the controller and the delegate_to host or the controller
+        # and the remote_host if delegate_to isn't set.
 
         remote_transport = False
-        if original_transport != 'local':
+        if self._play_context.connection != 'local':
             remote_transport = True
 
         try:
@@ -138,7 +162,14 @@ class ActionModule(ActionBase):
         except KeyError:
             dest_host = dest_host_inventory_vars.get('ansible_ssh_host', inventory_hostname)
 
-        dest_is_local = dest_host in C.LOCALHOST
+        # dest_is_local tells us if the host rsync runs on is the same as the
+        # host rsync puts the files on.  This is about *rsync's connection*,
+        # not about the ansible connection to run the module.
+        dest_is_local = False
+        if not delegate_to and dest_host in C.LOCALHOST:
+            dest_is_local = True
+        elif delegate_to and delegate_to == dest_host:
+            dest_is_local = True
 
         # CHECK FOR NON-DEFAULT SSH PORT
         if self._task.args.get('dest_port', None) is None:
@@ -234,7 +265,7 @@ class ActionModule(ActionBase):
         rsync_path = self._task.args.get('rsync_path', None)
 
         if not dest_is_local:
-            if self._play_context.become and not rsync_path and transport_overridden:
+            if self._play_context.become and not rsync_path:
                 # If no rsync_path is set, become was originally set, and dest is
                 # remote then add privilege escalation here.
                 if self._play_context.become_method == 'sudo':
